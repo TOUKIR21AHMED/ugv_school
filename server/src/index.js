@@ -20,17 +20,14 @@ const required=['MONGO_URI','JWT_SECRET','CLIENT_ORIGIN']
 for(const k of required)if(!process.env[k]){console.error(`Missing ${k} in server/.env`);process.exit(1)}
 if(process.env.JWT_SECRET.length<32){console.error('JWT_SECRET must be at least 32 characters');process.exit(1)}
 const app=express()
-// Local image storage: works for local testing and persistent VPS disks.
+// Cloudinary stores uploads persistently; existing /uploads URLs remain valid.
+import {cloudinary, sendStoredFile, uploadBuffer, imageLooksValid} from './cloudinaryStorage.js'
 const here=path.dirname(fileURLToPath(import.meta.url))
 const uploadsDir=path.resolve(here,'../uploads')
-fs.mkdirSync(uploadsDir,{recursive:true})
-const allowedTypes=new Map([['image/jpeg','.jpg'],['image/png','.png'],['image/webp','.webp']])
-const upload=multer({
- storage:multer.diskStorage({destination:uploadsDir,filename:(req,file,cb)=>cb(null,`hero-${Date.now()}-${Math.random().toString(36).slice(2,10)}${allowedTypes.get(file.mimetype)||'.tmp'}`)}),
- limits:{fileSize:5*1024*1024,files:1},
- fileFilter:(req,file,cb)=>allowedTypes.has(file.mimetype)?cb(null,true):cb(new Error('Only JPG, PNG and WebP images are accepted'))
-})
-app.use('/uploads',express.static(uploadsDir,{index:false,fallthrough:false,setHeaders:(res)=>res.setHeader('X-Content-Type-Options','nosniff')}))
+const allowedTypes=new Set(['image/jpeg','image/png','image/webp'])
+const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:5*1024*1024,files:1},
+ fileFilter:(req,file,cb)=>allowedTypes.has(file.mimetype)?cb(null,true):cb(new Error('Only JPG, PNG and WebP images are accepted'))})
+app.get('/uploads/:filename',sendStoredFile)
 app.use(helmet())
 app.use(cors({origin:process.env.CLIENT_ORIGIN,credentials:true}))
 app.use(express.json({limit:'32kb'}))
@@ -57,27 +54,16 @@ app.get('/api/site-settings',async(req,res,next)=>{try{
 }catch(e){next(e)}})
 
 // Protected image upload and settings update.
-app.post('/api/admin/hero-image',requireAuth,(req,res,next)=>{
- upload.single('image')(req,res,async err=>{
-  if(err){const status=err instanceof multer.MulterError?400:400;return res.status(status).json({message:err.message})}
+app.post('/api/admin/hero-image',requireAuth,upload.single('image'),async(req,res,next)=>{
+ try{
   if(!req.file)return res.status(400).json({message:'Please select an image'})
-  try{
-   // Verify the actual file header rather than trusting MIME alone.
-   const fd=fs.openSync(req.file.path,'r');const b=Buffer.alloc(12);fs.readSync(fd,b,0,12,0);fs.closeSync(fd)
-   const isJpg=b[0]===0xff&&b[1]===0xd8&&b[2]===0xff
-   const isPng=b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
-   const isWebp=b.toString('ascii',0,4)==='RIFF'&&b.toString('ascii',8,12)==='WEBP'
-   const verified=(req.file.mimetype==='image/jpeg'&&isJpg)||(req.file.mimetype==='image/png'&&isPng)||(req.file.mimetype==='image/webp'&&isWebp)
-   if(!verified){fs.unlinkSync(req.file.path);return res.status(400).json({message:'Invalid image file'})}
-   const heroImage=`/uploads/${req.file.filename}`
-   const old=await SiteSettings.findOneAndUpdate({key:'main'},{$set:{heroImage}},{upsert:true,new:false})
-   if(old?.heroImage?.startsWith('/uploads/')){
-    const oldName=path.basename(old.heroImage)
-    if(oldName!==req.file.filename)fs.promises.unlink(path.join(uploadsDir,oldName)).catch(()=>{})
-   }
-   res.json({message:'Hero image updated',heroImage})
-  }catch(e){fs.promises.unlink(req.file.path).catch(()=>{});next(e)}
- })
+  if(!imageLooksValid(req.file.buffer,req.file.mimetype))return res.status(400).json({message:'Invalid image file'})
+  const filename=`hero-${Date.now()}-${Math.random().toString(36).slice(2,10)}${req.file.mimetype==='image/png'?'.png':req.file.mimetype==='image/webp'?'.webp':'.jpg'}`
+  await uploadBuffer(req.file.buffer,filename)
+  const heroImage=`/uploads/${filename}`
+  await SiteSettings.findOneAndUpdate({key:'main'},{$set:{heroImage}},{upsert:true})
+  res.json({message:'Hero image updated',heroImage})
+ }catch(e){next(e)}
 })
 
 app.get('/api/notices',async(req,res,next)=>{try{const notices=await Notice.find({published:true}).sort({createdAt:-1}).limit(20).lean();res.json({notices})}catch(e){next(e)}})

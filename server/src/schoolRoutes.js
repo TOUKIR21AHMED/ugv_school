@@ -3,12 +3,25 @@ import mongoose from 'mongoose'
 import multer from 'multer'
 import fs from 'node:fs'
 import path from 'node:path'
+import {uploadBuffer,imageLooksValid} from './cloudinaryStorage.js'
 import {SchoolDocument,Staff,SchoolContent,Gallery,Admission} from './models/SchoolData.js'
 export default function schoolRoutes({requireAuth,uploadsDir}){
  const r=Router();const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next)
  const extensions={ 'application/pdf':'.pdf','image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp'}
- const file=multer({storage:multer.diskStorage({destination:uploadsDir,filename:(req,f,cb)=>cb(null,`school-${Date.now()}-${Math.random().toString(36).slice(2,11)}${extensions[f.mimetype]||'.tmp'}`)}),limits:{fileSize:8*1024*1024},fileFilter:(req,f,cb)=>extensions[f.mimetype]?cb(null,true):cb(new Error('Only PDF/JPG/PNG/WebP allowed'))})
- function safeUpload(req,res,next){file.single('file')(req,res,(err)=>{if(err)return res.status(400).json({message:err.message});if(!req.file)return res.status(400).json({message:'File required'});const b=fs.readFileSync(req.file.path).subarray(0,12);const pdf=b.subarray(0,5).toString()==='%PDF-';const jpg=b[0]===255&&b[1]===216&&b[2]===255;const png=b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]));const webp=b.toString('ascii',0,4)==='RIFF'&&b.toString('ascii',8,12)==='WEBP';const valid=({'application/pdf':pdf,'image/jpeg':jpg,'image/png':png,'image/webp':webp})[req.file.mimetype];if(!valid){fs.unlinkSync(req.file.path);return res.status(400).json({message:'File content does not match its type'})}next()})}
+ const file=multer({storage:multer.memoryStorage(),limits:{fileSize:8*1024*1024},
+  fileFilter:(req,f,cb)=>extensions[f.mimetype]?cb(null,true):cb(new Error('Only PDF/JPG/PNG/WebP allowed'))})
+ function safeUpload(req,res,next){file.single('file')(req,res,async(err)=>{
+  if(err)return res.status(400).json({message:err.message})
+  if(!req.file)return res.status(400).json({message:'File required'})
+  const mime=req.file.mimetype
+  if(!imageLooksValid(req.file.buffer,mime))return res.status(400).json({message:'File content does not match its type'})
+  if(req.path==='/admissions/photo' && (!mime.startsWith('image/')||req.file.size>100*1024))return res.status(400).json({message:'Photograph must be an image under 100KB'})
+  try{
+   req.file.filename=`school-${Date.now()}-${Math.random().toString(36).slice(2,11)}${extensions[mime]}`
+   await uploadBuffer(req.file.buffer,req.file.filename)
+   next()
+  }catch(e){next(e)}
+ })}
  const clean=(v,max=200)=>String(v??'').trim().slice(0,max)
  const models={documents:SchoolDocument,staff:Staff,content:SchoolContent,gallery:Gallery}
  r.get('/public/:collection',wrap(async(req,res)=>{let Model=models[req.params.collection];if(!Model)return res.sendStatus(404);const q=req.params.collection==='content'?{}:{published:true};const items=await Model.find(q).sort({order:1,createdAt:-1}).limit(500).lean();res.json({items})}))
@@ -23,7 +36,7 @@ export default function schoolRoutes({requireAuth,uploadsDir}){
  r.delete('/admin/:collection/:id',requireAuth,wrap(async(req,res)=>{const Model=models[req.params.collection];if(!Model||!mongoose.isValidObjectId(req.params.id))return res.sendStatus(400);const item=await Model.findByIdAndDelete(req.params.id);if(!item)return res.sendStatus(404);res.json({ok:true})}))
  // Applicants' private information is never served by a public list endpoint.
  const admissionUpload=(req,res,next)=>safeUpload(req,res,next)
- r.post('/admissions/photo',admissionUpload,(req,res)=>{if(!req.file.mimetype.startsWith('image/')){fs.unlinkSync(req.file.path);return res.status(400).json({message:'Photograph must be an image'})}if(req.file.size>100*1024){fs.unlinkSync(req.file.path);return res.status(400).json({message:'Photograph must be under 100KB'})}res.json({url:'/uploads/'+req.file.filename})})
+ r.post('/admissions/photo',admissionUpload,(req,res)=>{res.json({url:'/uploads/'+req.file.filename})})
  r.post('/admissions',wrap(async(req,res)=>{const b=req.body||{};const required=['studentName','dob','birthRegNo','gender','religion','nationality','fatherName','motherName','presentAddress','permanentAddress','mobile','grade','photoUrl'];if(required.some(k=>!clean(b[k])))return res.status(400).json({message:'Fill all required fields'});if(!/^[0-9]{11}$/.test(clean(b.mobile)))return res.status(400).json({message:'Enter an 11-digit mobile number'});if(!['6','7','8','9','10'].includes(clean(b.grade)))return res.status(400).json({message:'Invalid class'});if(['9','10'].includes(clean(b.grade))&&!['science','arts','commerce'].includes(clean(b.group)))return res.status(400).json({message:'Choose group'});if(!/^\/uploads\/school-/.test(clean(b.photoUrl)))return res.status(400).json({message:'Upload a photograph'});const data={};for(const k of ['studentName','dob','birthRegNo','gender','religion','nationality','fatherName','fatherNid','motherName','motherNid','guardianName','guardianNid','presentAddress','permanentAddress','mobile','grade','group','photoUrl'])data[k]=clean(b[k],k.includes('Address')?600:200);const item=await Admission.create(data);res.status(201).json({applicationId:item.id,message:'Application submitted'})}))
  r.patch('/admin/admissions/:id',requireAuth,wrap(async(req,res)=>{if(!mongoose.isValidObjectId(req.params.id))return res.sendStatus(400);const update={};if(typeof req.body.isRead==='boolean')update.isRead=req.body.isRead;if(['new','under-review','accepted','rejected'].includes(req.body.status))update.status=req.body.status;const item=await Admission.findByIdAndUpdate(req.params.id,{$set:update},{new:true,runValidators:true});if(!item)return res.sendStatus(404);res.json({item})}))
  return r
