@@ -138,7 +138,7 @@ function App() {
         </div>
       </section>
     </main>
-    <footer className="refresh-footer"><div className="refresh-container"><strong>ইউনাইটেড মাধ্যমিক বিদ্যালয়</strong><p>দিয়াপাড়া, ২৮ নং ওয়ার্ড, বরিশাল সিটি কর্পোরেশন, কাশিপুর, বরিশাল।</p><p>© {new Date().getFullYear()} United Madhyamik Bidyalaya</p></div></footer>
+    <footer className="refresh-footer"><div className="refresh-container"><strong>ইউনাইটেড মাধ্যমিক বিদ্যালয়</strong><p>দিয়াপাড়া, ২৮ নং ওয়ার্ড, বরিশাল সিটি কর্পোরেশন, কাশিপুর, বরিশাল।</p><p>© {new Date().getFullYear()} United High School, Barishal</p><p>Developed by: Department of CSE</p><p>University of Global Village, Barishal</p></div></footer>
   </>
 }
 
